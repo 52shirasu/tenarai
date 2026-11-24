@@ -4,7 +4,9 @@
 import PackageDescription
 
 #if os(macOS)
-let kanaKanjiConverterTraits: Set<Package.Dependency.Trait> = ["Zenzai"]
+// The bundled Metal backend crashes while loading a BF16 kernel on the development machine.
+// Use the upstream CPU-only backend until GPU compatibility is verified.
+let kanaKanjiConverterTraits: Set<Package.Dependency.Trait> = ["ZenzaiCPU"]
 #else
 // for testing in Ubuntu environment.
 let kanaKanjiConverterTraits: Set<Package.Dependency.Trait> = []
@@ -19,6 +21,14 @@ var products: [Product] = [
 ]
 
 var targets: [Target] = [
+    .executableTarget(name: "SecurityScenarios", dependencies: ["Core"], swiftSettings: [.interoperabilityMode(.Cxx)]),
+    .executableTarget(name: "TenaraiScenarios", dependencies: ["Core"], swiftSettings: [.interoperabilityMode(.Cxx)]),
+    .executableTarget(name: "TenaraiChecks", dependencies: ["Core"], swiftSettings: [.interoperabilityMode(.Cxx)]),
+    .executableTarget(
+        name: "TenaraiMemoryTool",
+        dependencies: ["Core", .product(name: "KanaKanjiConverterModuleWithDefaultDictionary", package: "AzooKeyKanaKanjiConverter")],
+        swiftSettings: [.interoperabilityMode(.Cxx)]
+    ),
     .executableTarget(
         name: "git-info-generator"
     ),
@@ -32,18 +42,29 @@ var targets: [Target] = [
         dependencies: [
             .product(name: "SwiftUtils", package: "AzooKeyKanaKanjiConverter"),
             .product(name: "KanaKanjiConverterModuleWithDefaultDictionary", package: "AzooKeyKanaKanjiConverter"),
+            .product(name: "EfficientNGram", package: "AzooKeyKanaKanjiConverter"),
             .product(name: "Crypto", package: "swift-crypto"),
-            .product(name: "ZIPFoundation", package: "ZIPFoundation")
+            .product(name: "ZIPFoundation", package: "ZIPFoundation"),
+            .product(name: "LearningCore", package: "LearningCore")
         ],
-        swiftSettings: [.interoperabilityMode(.Cxx)],
+        resources: [.process("Resources")],
+        swiftSettings: [.interoperabilityMode(.Cxx), .define("TENARAI_LOCAL_ONLY")],
         plugins: [
             .plugin(name: "GitInfoPlugin")
         ]
     ),
     .testTarget(
         name: "CoreTests",
-        dependencies: ["Core"],
+        dependencies: ["Core", "TrendWords", .product(name: "LearningCore", package: "LearningCore")],
         swiftSettings: [.interoperabilityMode(.Cxx)]
+    ),
+    // 流行語の一覧の取得と生成。通信するプログラムに使うため Foundation だけに依存し、Core は含めない
+    .target(
+        name: "TrendWords"
+    ),
+    .testTarget(
+        name: "TrendWordsTests",
+        dependencies: ["TrendWords"]
     )
 ]
 
@@ -57,8 +78,20 @@ products.append(
 targets.append(
     .executableTarget(
         name: "ConverterServer",
-        dependencies: ["Core"],
+        dependencies: ["Core", .product(name: "LearningCore", package: "LearningCore")],
         swiftSettings: [.interoperabilityMode(.Cxx)]
+    )
+)
+products.append(
+    .executable(
+        name: "TrendWordsUpdater",
+        targets: ["TrendWordsUpdater"]
+    )
+)
+targets.append(
+    .executableTarget(
+        name: "TrendWordsUpdater",
+        dependencies: ["TrendWords"]
     )
 )
 #endif
@@ -68,7 +101,8 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: products,
     dependencies: [
-        .package(url: "https://github.com/azooKey/AzooKeyKanaKanjiConverter", revision: "ad714fea8cb2fe113aea86ba5c42563cdaf77cfb", traits: kanaKanjiConverterTraits),
+        .package(path: "../LearningCore"),
+        .package(path: "../Vendor/AzooKeyKanaKanjiConverter", traits: kanaKanjiConverterTraits),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.0")
     ],

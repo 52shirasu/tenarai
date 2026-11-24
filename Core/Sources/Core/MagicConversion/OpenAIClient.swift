@@ -233,6 +233,8 @@ public struct OpenAIRequest {
     }
 }
 
+public enum LocalOnlyError: Error { case externalInferenceDisabled }
+
 public enum OpenAIError: LocalizedError, @unchecked Sendable {
     case invalidURL
     case noServerResponse
@@ -271,6 +273,9 @@ public enum OpenAIError: LocalizedError, @unchecked Sendable {
 public enum OpenAIClient {
     // APIリクエストを送信する静的メソッド
     public static func sendRequest(_ request: OpenAIRequest, apiKey: String, apiEndpoint: String, logger: ((String) -> Void)? = nil) async throws -> [String] {
+        #if TENARAI_LOCAL_ONLY
+        throw LocalOnlyError.externalInferenceDisabled
+        #else
         guard let url = URL(string: apiEndpoint) else {
             throw OpenAIError.invalidURL
         }
@@ -298,6 +303,7 @@ public enum OpenAIClient {
 
         // レスポンスデータの解析
         return try parseResponseData(data, logger: logger)
+        #endif
     }
 
     // レスポンスデータのパースを行う静的メソッド
@@ -350,6 +356,9 @@ public enum OpenAIClient {
 
     // Simple text transformation method for AI Transform feature
     public static func sendTextTransformRequest(prompt: String, modelName: String, apiKey: String, apiEndpoint: String) async throws -> String {
+        #if TENARAI_LOCAL_ONLY
+        throw LocalOnlyError.externalInferenceDisabled
+        #else
         guard let url = URL(string: apiEndpoint) else {
             throw OpenAIError.invalidURL
         }
@@ -418,6 +427,7 @@ public enum OpenAIClient {
         }
 
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        #endif
     }
 }
 

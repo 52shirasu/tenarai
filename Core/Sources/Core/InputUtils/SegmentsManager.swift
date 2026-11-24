@@ -2,6 +2,10 @@ import Foundation
 import KanaKanjiConverterModuleWithDefaultDictionary
 
 public final class SegmentsManager {
+    // Bundled, immutable data. Rebuilding this on every key repeatedly parses the
+    // entire emoji dictionary; no user input or learned candidates belong here.
+    static let bundledTextReplacer = TextReplacer.withDefaultEmojiDictionary()
+
     public init(
         kanaKanjiConverter: KanaKanjiConverter,
         applicationDirectoryURL: URL,
@@ -26,6 +30,13 @@ public final class SegmentsManager {
         var resourcesDirectoryURL: URL?
     }
 
+    public var learnedLatinWords: [String] = []
+    public var onExplicitLatinCommit: (@MainActor (String) -> Void)?
+    private var explicitlySelectedLatin = false
+    public var learnedProfile: String = ""
+    /// Shift-started Latin input stays literal until an explicit candidate request.
+    public var defersLatinConversion = false
+
     public weak var delegate: (any SegmentManagerDelegate)?
     private var kanaKanjiConverter: KanaKanjiConverter
     private let applicationDirectoryURL: URL
@@ -36,7 +47,7 @@ public final class SegmentsManager {
     private var lastInputStyle: InputStyle = .direct
 
     private var liveConversionEnabled: Bool {
-        Config.LiveConversion().value
+        Config.LiveConversion().value && !defersLatinConversion
     }
     private var zenzaiPersonalizationLevel: Config.ZenzaiPersonalizationLevel.Value {
         Config.ZenzaiPersonalizationLevel().value
@@ -82,34 +93,24 @@ public final class SegmentsManager {
         }
     }
 
-    private lazy var zenzaiPersonalizationMode: ConvertRequestOptions.ZenzaiMode.PersonalizationMode? = self.getZenzaiPersonalizationMode()
-
-    private func getZenzaiPersonalizationMode() -> ConvertRequestOptions.ZenzaiMode.PersonalizationMode? {
-        let alpha = self.zenzaiPersonalizationLevel.alpha
-        // オフなので。
-        if alpha == 0 {
+    /// Personal n-gram model for Zenzai, when one has been trained and the level is not off.
+    /// Looked up per request: a rebuilt model lives at a new path and is picked up at once.
+    private func currentPersonalizationMode() -> ConvertRequestOptions.ZenzaiMode.PersonalizationMode? {
+        let alpha = self.evaluationAlpha ?? Self.personalizationAlphaOverride ?? self.zenzaiPersonalizationLevel.alpha
+        guard alpha > 0,
+              let personal = PersonalLanguageModelStore.shared.currentModelPrefix(),
+              let base = PersonalLanguageModelStore.baseModelPrefix(resources: self.resourcesDirectoryURL) else {
             return nil
         }
-        guard let containerURL else {
-            self.appendDebugMessage("❌ Failed to get container URL.")
-            return nil
-        }
-
-        let base = self.resourcesDirectoryURL.appendingPathComponent("lm", isDirectory: false).path
-        let personal = containerURL.appendingPathComponent("Library/Application Support/p13n_v1").path + "/lm"
-        // check personal lm existence
-        guard [
-            FileManager.default.fileExists(atPath: personal + "_c_abc.marisa"),
-            FileManager.default.fileExists(atPath: personal + "_r_xbx.marisa"),
-            FileManager.default.fileExists(atPath: personal + "_u_abx.marisa"),
-            FileManager.default.fileExists(atPath: personal + "_u_xbc.marisa")
-        ].allSatisfy(\.self) else {
-            self.appendDebugMessage("❌ Seems like there is missing marisa file for prefix \(personal)")
-            return nil
-        }
-
         return .init(baseNgramLanguageModel: base, personalNgramLanguageModel: personal, alpha: alpha)
     }
+
+    /// Isolated experiments only: force the personalization strength.
+    static let personalizationAlphaOverride: Float? = {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["TENARAI_TEST_ROOT"] != nil, let raw = environment["TENARAI_TEST_P13N_ALPHA"] else { return nil }
+        return Float(raw)
+    }()
 
     private enum Operation: Sendable {
         case insert
@@ -119,8 +120,19 @@ public final class SegmentsManager {
     }
 
     private enum ContextLength {
-        static let conversion = 30
+        static let conversion = 200
     }
+
+    /// Characters of left/right context given to Zenzai (the compacted context is
+    /// at most `ContextLength.conversion`). Isolated tests may override it.
+    static let zenzaiContextLength: Int = {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["TENARAI_TEST_ROOT"] != nil,
+           let raw = environment["TENARAI_TEST_CONTEXT_LENGTH"], let value = Int(raw), value > 0 {
+            return value
+        }
+        return 200
+    }()
 
     public func appendDebugMessage(_ string: String) {
         self.debugCandidates.insert(
@@ -143,19 +155,21 @@ public final class SegmentsManager {
         rightSideContext: String?,
         requestRichCandidates: Bool
     ) -> ConvertRequestOptions.ZenzaiMode {
-        if !self.context.useZenzai {
-            return .off
-        }
+        guard self.context.useZenzai, let verifiedModel = LocalInferenceSecurity.approvedModelURL else { return .off }
         return .on(
-            weight: self.resourcesDirectoryURL.appendingPathComponent("ggml-model-Q5_K_M.gguf", isDirectory: false),
+            weight: verifiedModel,
             inferenceLimit: Config.ZenzaiInferenceLimit().value,
             requestRichCandidates: requestRichCandidates,
-            personalizationMode: self.zenzaiPersonalizationMode,
+            personalizationMode: self.currentPersonalizationMode(),
             versionDependentMode: .v3(
                 .init(
-                    profile: Config.ZenzaiProfile().value,
+                    profile: self.learnedProfile,
                     leftSideContext: leftSideContext,
                     rightSideContext: rightSideContext,
+                    // Without a limit the prompt builder keeps only 40 characters on each
+                    // side, dropping the summary of the farther text in the field.
+                    maxLeftSideContextLength: Self.zenzaiContextLength,
+                    maxRightSideContextLength: Self.zenzaiContextLength,
                     enableAlignmentSeparator: true,
                     )
             )
@@ -195,10 +209,10 @@ public final class SegmentsManager {
             keyboardLanguage: .ja_JP,
             englishCandidateInRoman2KanaInput: false,
             fullWidthRomanCandidate: true,
-            learningType: Config.Learning().value.learningType,
+            learningType: self.effectiveLearningType,
             memoryDirectoryURL: self.azooKeyMemoryDir,
             sharedContainerURL: CompiledUserDictionaryStore.directoryURL(memoryDirectoryURL: self.azooKeyMemoryDir),
-            textReplacer: .withDefaultEmojiDictionary(),
+            textReplacer: Self.bundledTextReplacer,
             specialCandidateProviders: KanaKanjiConverter.defaultSpecialCandidateProviders,
             zenzaiMode: self.zenzaiMode(
                 leftSideContext: leftSideContext,
@@ -231,7 +245,6 @@ public final class SegmentsManager {
         self.backspaceAdjustedPredictionCandidate = nil
         self.backspaceTypoCorrectionLock = nil
         self.lastInputStyle = .direct
-        self.zenzaiPersonalizationMode = self.getZenzaiPersonalizationMode()
     }
 
     @MainActor
@@ -268,6 +281,8 @@ public final class SegmentsManager {
     @MainActor
     /// この入力を打ち切る
     public func stopComposition() {
+        self.defersLatinConversion = false
+        explicitlySelectedLatin = false
         self.composingText.stopComposition()
         self.kanaKanjiConverter.stopComposition()
         self.rawCandidates = nil
@@ -309,6 +324,21 @@ public final class SegmentsManager {
         if !skipUpdate {
             self.updateRawCandidate()
         }
+    }
+
+    /// Enter confirms the reading: a final single "n" still waiting for the next key
+    /// means ん, as in standard IMEs. Without this, "henkan" + Enter committed "変化n".
+    /// Latin (direct) input such as "Japan" is left untouched.
+    @MainActor
+    public func finishPendingRomajiN(inputStyle: InputStyle) {
+        guard inputStyle != .direct, !self.defersLatinConversion,
+              self.composingText.isAtEndIndex,
+              self.composingText.convertTarget.count > 1,
+              self.composingText.convertTarget.last == "n",
+              self.composingText.convertTarget.unicodeScalars.contains(where: { !$0.isASCII }) else {
+            return
+        }
+        self.insertCompositionSeparator(inputStyle: inputStyle, skipUpdate: false)
     }
 
     @MainActor
@@ -478,7 +508,7 @@ public final class SegmentsManager {
 
     public func getCleanLeftSideContext(maxCount: Int) -> String? {
         self.delegate?.getLeftSideContext(maxCount: maxCount).map {
-            var last = $0.split(separator: "\n", omittingEmptySubsequences: false).last ?? $0[...]
+            var last = $0.suffix(maxCount)
             // 前方の空白を削除する
             while last.first?.isWhitespace ?? false {
                 last = last.dropFirst()
@@ -489,7 +519,7 @@ public final class SegmentsManager {
 
     public func getCleanRightSideContext(maxCount: Int) -> String? {
         self.delegate?.getRightSideContext(maxCount: maxCount).map {
-            var first = $0.split(separator: "\n", omittingEmptySubsequences: false).first ?? $0[...]
+            var first = $0.prefix(maxCount)
             // 後方の空白を削除する
             while first.last?.isWhitespace ?? false {
                 first = first.dropLast()
@@ -515,6 +545,14 @@ public final class SegmentsManager {
         forcedLeftSideContext: String? = nil,
         forcedRightSideContext: String? = nil
     ) {
+        if defersLatinConversion && !requestRichCandidates {
+            explicitlySelectedLatin = false
+            self.rawCandidates = nil
+            self.selectionIndex = nil
+            self.shouldShowCandidateWindow = false
+            self.resetAdditionalCandidates()
+            return
+        }
         if self.lastOperation != .delete {
             self.backspaceAdjustedPredictionCandidate = nil
             self.backspaceTypoCorrectionLock = nil
@@ -526,51 +564,148 @@ public final class SegmentsManager {
             self.kanaKanjiConverter.stopComposition()
             return
         }
-        /// 日付・時刻変換を事前に入れておく
-        let dynamicShortcuts: [DicdataElement] =
-            [
-                ("M/d", -18, DateTemplateLiteral.CalendarType.western),
-                ("yyyy/MM/dd", -18.1, .western),
-                ("yyyy-MM-dd", -18.2, .western),
-                ("M月d日（E）", -18.3, .western),
-                ("yyyy年M月d日", -18.4, .western),
-                ("Gyyyy年M月d日", -18.5, .japanese),
-                ("E曜日", -18.6, .western)
-            ].flatMap { (format, value: PValue, type) in
-                [
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-2", deltaUnit: 60 * 60 * 24).export(), ruby: "オトトイ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-1", deltaUnit: 60 * 60 * 24).export(), ruby: "キノウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "キョウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "1", deltaUnit: 60 * 60 * 24).export(), ruby: "アシタ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
-                    .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "2", deltaUnit: 60 * 60 * 24).export(), ruby: "アサッテ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value)
-                ]
-            } + [
-                // 月
-                .init(word: DateTemplateLiteral(format: "MM月", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コンゲツ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
-                // 年
-                .init(word: DateTemplateLiteral(format: "yyyy年", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
-                .init(word: DateTemplateLiteral(format: "Gyyyy年", type: .japanese, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.1),
-                // 時刻
-                .init(word: DateTemplateLiteral(format: "HH:mm", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "イマ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
-                .init(word: DateTemplateLiteral(format: "HH時mm分", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "イマ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.1),
-                .init(word: DateTemplateLiteral(format: "aK時mm分", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "イマ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.2)
-            ]
-
-        self.kanaKanjiConverter.importDynamicUserDictionary([], shortcuts: dynamicShortcuts)
+        self.kanaKanjiConverter.importDynamicUserDictionary([], shortcuts: Self.dateTimeShortcuts)
 
         let leftSideContext = forcedLeftSideContext ?? self.getCleanLeftSideContext(maxCount: ContextLength.conversion)
         let rightSideContext = forcedRightSideContext ?? self.getCleanRightSideContext(maxCount: ContextLength.conversion)
-        let result = self.kanaKanjiConverter.requestCandidates(
+        var result = self.kanaKanjiConverter.requestCandidates(
             self.composingText,
             options: options(
                 leftSideContext: leftSideContext,
                 rightSideContext: rightSideContext,
                 requestRichCandidates: requestRichCandidates,
                 requireJapanesePrediction: Config.DebugPredictiveTyping().value ? .manualMix : .disabled,
-                requireEnglishPrediction: Config.DebugPredictiveTyping().value ? .manualMix : .disabled
+                requireEnglishPrediction: defersLatinConversion ? .autoMix : (Config.DebugPredictiveTyping().value ? .manualMix : .disabled)
             )
         )
+        // Expand dictionary coverage when the user opens candidates, not every keystroke.
+        if requestRichCandidates && self.context.useZenzai {
+            var dictionaryOptions = options(leftSideContext: nil, rightSideContext: nil,
+                requestRichCandidates: false, requireJapanesePrediction: .disabled, requireEnglishPrediction: .disabled)
+            dictionaryOptions.zenzaiMode = .off
+            dictionaryOptions.N_best = 40
+            let extra = self.kanaKanjiConverter.requestCandidates(self.composingText, options: dictionaryOptions)
+            var seen = Set(result.mainResults.map(\.text))
+            result.mainResults += extra.mainResults.filter { seen.insert($0.text).inserted }.prefix(16)
+            var seenClauses = Set(result.firstClauseResults.map(\.text))
+            result.firstClauseResults += extra.firstClauseResults.filter {
+                $0.rubyCount >= min(2, self.composingText.convertTarget.count) && seenClauses.insert($0.text).inserted
+            }.prefix(16)
+        }
+        if defersLatinConversion {
+            let input = self.composingText.prefixToCursorPosition().convertTarget
+            let personal = Config.UserDictionary().value.items + Config.SystemUserDictionary().value.items
+                + learnedLatinWords.map { Config.UserDictionaryEntry(word: $0, reading: "") }
+            let english = LatinConversionCandidates.words(for: input, personal: personal).map { word in
+                self.getModifiedRomanCandidate(inputState: .selecting) { _ in word }
+            }
+            var seen = Set<String>()
+            result.mainResults = (english + result.mainResults.filter {
+                self.composingText.isWholeComposingText(composingCount: $0.composingCount)
+            }).filter { seen.insert($0.text).inserted }
+            // A single English word must not select just its first letter by default.
+            result.firstClauseResults = result.mainResults
+        }
+        if requestRichCandidates && !defersLatinConversion {
+            let input = self.composingText.prefixToCursorPosition()
+            let raw = input.input.map(\.piece).inputString(preferIntention: false)
+            let personal = Config.UserDictionary().value.items + Config.SystemUserDictionary().value.items
+            let dateTimeSuggestions = DateTimeCandidates.suggestions(reading: input.convertTarget)
+            // Promote existing date/time spellings too: otherwise a duplicate can stay
+            // below the visible page while only newly generated formats appear near the top.
+            let promotedTexts = Set(dateTimeSuggestions)
+            let originalFirst = result.mainResults.first
+            result.mainResults.removeAll { promotedTexts.contains($0.text) }
+            if let originalFirst, promotedTexts.contains(originalFirst.text) {
+                result.mainResults.insert(originalFirst, at: 0)
+            }
+            let suggestions = dateTimeSuggestions
+                + JapaneseTypoCandidates.suggestions(raw: raw, reading: input.convertTarget, personal: personal)
+            let extra = suggestions.filter { text in !result.mainResults.contains { $0.text == text } }.map { text in
+                // Use the original input count: a repaired reading has a different length.
+                Candidate(text: text, value: -1, composingCount: .inputCount(input.input.count),
+                          lastMid: MIDData.一般.mid, data: [])
+            }
+            result.mainResults.insert(contentsOf: extra, at: min(1, result.mainResults.count))
+            if !suggestions.isEmpty && !result.mainResults.contains(where: { $0.text == input.convertTarget }) {
+                result.mainResults.append(Candidate(text: input.convertTarget, value: -1,
+                    composingCount: .inputCount(input.input.count), lastMid: MIDData.一般.mid, data: []))
+            }
+            // A one-edit miss of a curated fixed phrase is never meant literally, and
+            // splitting it into clauses only exposes the typo ("おはよう｜gざいます").
+            // Offer the corrected whole phrase first; personal-word matches stay second.
+            let phraseCorrections = Set(JapaneseTypoCandidates.phraseCorrections(raw: raw, reading: input.convertTarget))
+            if !phraseCorrections.isEmpty, self.composingText.isAtEndIndex {
+                let corrections = result.mainResults.filter { phraseCorrections.contains($0.text) }
+                result.mainResults.removeAll { phraseCorrections.contains($0.text) }
+                result.mainResults.insert(contentsOf: corrections, at: 0)
+                result.firstClauseResults.insert(contentsOf: corrections, at: 0)
+            }
+        }
         self.rawCandidates = result
+    }
+
+    /// 日付・時刻変換を事前に入れておく。日時はテンプレートで、変換時に展開されるため不変。
+    private static let dateTimeShortcuts: [DicdataElement] =
+        [
+            ("M/d", -18, DateTemplateLiteral.CalendarType.western),
+            ("yyyy/MM/dd", -18.1, .western),
+            ("yyyy-MM-dd", -18.2, .western),
+            ("M月d日（E）", -18.3, .western),
+            ("yyyy年M月d日", -18.4, .western),
+            ("Gyyyy年M月d日", -18.5, .japanese),
+            ("E曜日", -18.6, .western)
+        ].flatMap { (format, value: PValue, type) in
+            [
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-2", deltaUnit: 60 * 60 * 24).export(), ruby: "オトトイ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "-1", deltaUnit: 60 * 60 * 24).export(), ruby: "キノウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "キョウ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "1", deltaUnit: 60 * 60 * 24).export(), ruby: "アシタ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value),
+                .init(word: DateTemplateLiteral(format: format, type: type, language: .japanese, delta: "2", deltaUnit: 60 * 60 * 24).export(), ruby: "アサッテ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: value)
+            ]
+        } + [
+            // 月
+            .init(word: DateTemplateLiteral(format: "MM月", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コンゲツ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
+            // 年
+            .init(word: DateTemplateLiteral(format: "yyyy年", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
+            .init(word: DateTemplateLiteral(format: "Gyyyy年", type: .japanese, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "コトシ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.1),
+            // 時刻
+            .init(word: DateTemplateLiteral(format: "HH:mm", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "イマ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18),
+            .init(word: DateTemplateLiteral(format: "HH時mm分", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "イマ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.1),
+            .init(word: DateTemplateLiteral(format: "aK時mm分", type: .western, language: .japanese, delta: "0", deltaUnit: 1).export(), ruby: "イマ", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -18.2)
+        ]
+
+    /// Called with (reading in katakana, committed text, left context) for each committed
+    /// conversion that may be learned; used to measure the personal language model.
+    public var onLearnableCommit: ((String, String, String) -> Void)?
+    /// Called when the user committed a row other than the first of the candidate list:
+    /// (whole reading, first row, committed text, its reading in katakana, left context, row).
+    public var onCorrection: ((String, String, String, String, String, Int) -> Void)?
+    /// Measurement only: personalization strength for the next requests.
+    private var evaluationAlpha: Float?
+
+    /// The top conversion of `reading` with the given personalization strength. Used to
+    /// measure the personal model on the user's own commits; must run inside its own
+    /// converter session, and never learns.
+    @MainActor public func evaluationTopCandidate(reading: String, leftSideContext: String, alpha: Float) -> String? {
+        let hiragana = reading.applyingTransform(.hiraganaToKatakana, reverse: true) ?? reading
+        var text = ComposingText()
+        text.insertAtCursorPosition(hiragana, inputStyle: .direct)
+        evaluationAlpha = alpha
+        defer { evaluationAlpha = nil }
+        let options = options(leftSideContext: leftSideContext, rightSideContext: nil, requestRichCandidates: false,
+                              requireJapanesePrediction: .disabled, requireEnglishPrediction: .disabled)
+        let result = kanaKanjiConverter.requestCandidates(text, options: options)
+        kanaKanjiConverter.stopComposition()
+        return result.mainResults.first?.text
+    }
+
+    /// Set for apps excluded from learning: learned words are still used, nothing new is stored.
+    public var suppressesLearning = false
+
+    var effectiveLearningType: LearningType {
+        let configured = Config.Learning().value.learningType
+        return suppressesLearning && configured == .inputAndOutput ? .onlyOutput : configured
     }
 
     @MainActor public func update(requestRichCandidates: Bool) {
@@ -578,19 +713,57 @@ public final class SegmentsManager {
         self.shouldShowCandidateWindow = true
     }
 
+    /// Opens the candidate list for the current composition (Space, ↓). The list always
+    /// starts at its first row: a row index left from an earlier list (closed with
+    /// Escape, or committed) made the new list open in the middle (2026-11-19).
+    ///
+    /// The first row is the best result of the richer search, not necessarily the live
+    /// conversion on screen: Space is pressed mostly when that conversion is wrong, and
+    /// keeping it first cost a second Space to reach the right one.
+    @MainActor public func openCandidateList(inputStyle: InputStyle) {
+        self.insertCompositionSeparator(inputStyle: inputStyle, skipUpdate: true)
+        self.requestResettingSelection()
+        self.update(requestRichCandidates: true)
+    }
+
     /// - note: 画面更新との整合性を保つため、この関数の実行前に左文脈を取得し、これを引数として与える
     @MainActor public func prefixCandidateCommited(_ candidate: Candidate, leftSideContext: String) {
+        if defersLatinConversion && explicitlySelectedLatin && LatinConversionCandidates.validName(candidate.text) {
+            if !suppressesLearning { onExplicitLatinCommit?(candidate.text) }
+            explicitlySelectedLatin = false
+        }
         self.kanaKanjiConverter.setCompletedData(candidate)
-        self.kanaKanjiConverter.updateLearningData(candidate)
+        if !suppressesLearning {
+            self.kanaKanjiConverter.updateLearningData(candidate)
+            if Config.Learning().value == .inputAndOutput {
+                onLearnableCommit?(candidate.data.map(\.ruby).joined(), candidate.text, leftSideContext)
+                if let selectionIndex, selectionIndex > 0, let shown = self.candidates?.first, shown.text != candidate.text {
+                    onCorrection?(self.composingText.convertTarget, shown.text, candidate.text,
+                                  candidate.data.map(\.ruby).joined(), leftSideContext, selectionIndex)
+                }
+            }
+        }
         self.composingText.prefixComplete(composingCount: candidate.composingCount)
 
+        // The selection belongs to the candidate list that was just used. Without this
+        // reset after a whole commit, the next composition opened its list at the old
+        // row and Enter committed that row ("よう" -> 3rd row again, 2026-11-19).
+        self.selectionIndex = nil
+        self.isFixingAdditionalCandidateTop = false
+        self.didExperienceSegmentEdition = false
         if !self.composingText.isEmpty {
             // カーソルを右端に移動する
             _ = self.composingText.moveCursorFromCursorPosition(count: self.composingText.convertTarget.count - self.composingText.convertTargetCursorPosition)
-            self.didExperienceSegmentEdition = false
             self.shouldShowCandidateWindow = true
-            self.selectionIndex = nil
             self.updateRawCandidate(requestRichCandidates: true, forcedLeftSideContext: leftSideContext + candidate.text)
+        } else {
+            // Nothing is left: start the next composition from a clean text. After a
+            // segment edit the emptied text kept its cursor position, and the next key
+            // aborted the helper (negative prefix length, found by the Nov 19 sprint).
+            self.composingText.stopComposition()
+            self.rawCandidates = nil
+            self.shouldShowCandidateWindow = false
+            self.resetAdditionalCandidates()
         }
     }
 
@@ -601,6 +774,7 @@ public final class SegmentsManager {
     }
 
     public func requestSetCandidateWindowState(visible: Bool) {
+        if !visible { explicitlySelectedLatin = false }
         self.shouldShowCandidateWindow = visible
     }
 
@@ -610,12 +784,14 @@ public final class SegmentsManager {
 
     @MainActor
     public func requestSelectingNextCandidate() {
+        if defersLatinConversion { explicitlySelectedLatin = true }
         self.isFixingAdditionalCandidateTop = false
         self.selectionIndex = (self.selectionIndex ?? -1) + 1
     }
 
     @MainActor
     public func requestSelectingPrevCandidate() {
+        if defersLatinConversion { explicitlySelectedLatin = true }
         let selectionIndex = self.selectionIndex ?? 0
 
         if self.isFixingAdditionalCandidateTop && self.isShowingAdditionalCandidates {
@@ -645,6 +821,7 @@ public final class SegmentsManager {
     }
 
     public func requestSelectingRow(_ index: Int) {
+        if defersLatinConversion { explicitlySelectedLatin = true }
         if self.isFixingAdditionalCandidateTop, index != 0 {
             self.isFixingAdditionalCandidateTop = false
         }
@@ -660,6 +837,7 @@ public final class SegmentsManager {
     }
 
     public func requestResettingSelection() {
+        explicitlySelectedLatin = false
         self.selectionIndex = nil
         self.isFixingAdditionalCandidateTop = false
         self.resetAdditionalCandidates()
@@ -677,6 +855,7 @@ public final class SegmentsManager {
         case .none, .previewing, .replaceSuggestion, .attachDiacritic, .unicodeInput:
             return .hidden
         case .composing:
+            if defersLatinConversion { return .hidden }
             if !self.liveConversionEnabled, let firstCandidate = self.rawCandidates?.mainResults.first {
                 return .composing([firstCandidate], selectionIndex: 0)
             } else {
@@ -825,15 +1004,36 @@ public final class SegmentsManager {
         self.isFixingAdditionalCandidateTop = false
     }
 
+    /// - Parameter learn: `false` for commits the user did not ask for, such as the
+    ///   focus-change commit IMK requests while a composition is still being typed.
     @MainActor
-    public func commitMarkedText(inputState: InputState) -> String {
+    public func commitMarkedText(inputState: InputState, learn: Bool = true) -> String {
         let markedText = self.getCurrentMarkedText(inputState: inputState)
         let text = markedText.reduce(into: "") {$0.append(contentsOf: $1.content)}
-        if let candidate = self.candidates?.first(where: {$0.text == text}) {
+        // In selecting, the focused text is a candidate the user explicitly chose.
+        if learn,
+           inputState == .selecting || Self.shouldLearnImplicitCommit(text: text, reading: self.composingText.convertTarget),
+           let candidate = self.candidates?.first(where: {$0.text == text}) {
             self.prefixCandidateCommited(candidate, leftSideContext: "")
         }
         self.stopComposition()
         return text
+    }
+
+    /// Whether committing the marked text without choosing a candidate should teach
+    /// the converter. Unconverted kana (shown after Backspace or with live conversion
+    /// off) and text with pending romaji are not conversions the user picked; learning
+    /// them made raw readings and fragments such as "おk" outrank real conversions.
+    static func shouldLearnImplicitCommit(text: String, reading: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        if text == reading || text == reading.toKatakana() {
+            return false
+        }
+        if let last = reading.unicodeScalars.last, last.isASCII, CharacterSet.letters.contains(last),
+           reading.unicodeScalars.contains(where: { !$0.isASCII }) {
+            return false
+        }
+        return true
     }
 
     // サジェスト候補を設定するメソッド

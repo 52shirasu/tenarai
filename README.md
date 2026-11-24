@@ -1,3 +1,11 @@
+# tenarai
+
+[azooKey on macOS](https://github.com/azooKey/azooKey-Desktop) を元にした、個人利用向けの改造版です。カーソル前後の文脈を使った変換、書き手に合わせた学習、流行語辞書の自動更新などを追加しています。処理は Mac の中で行い、通信するのは流行語の一覧を取得する更新プログラムだけです。
+
+配布物（Releases、Homebrew）はありません。以下は元になった azooKey on macOS の説明です。
+
+---
+
 # azooKey on macOS
 
 [azooKey](https://github.com/ensan-hcl/azooKey)のmacOS版です。高精度なニューラルかな漢字変換エンジン「Zenzai」を導入した、オープンソースの日本語入力システムです。

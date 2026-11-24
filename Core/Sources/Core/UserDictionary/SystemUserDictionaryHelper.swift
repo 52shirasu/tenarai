@@ -23,6 +23,7 @@ public enum SystemUserDictionaryHelper: Sendable {
         case fileNotReadable(String)
         case failedToOpenDatabase(status: Int32)
         case failedToPrepareStatement(status: Int32)
+        case failedToReadRows(status: Int32)
     }
 
     #if os(macOS)
@@ -100,11 +101,28 @@ public enum SystemUserDictionaryHelper: Sendable {
             }
         }
 
+        return try readDatabase(at: dbPath)
+        #endif
+    }
+
+    /// Background refresh never presents a permission dialog or reads other settings.
+    public static func fetchEntriesAutomatically() throws(FetchError) -> [Entry] {
+        #if os(macOS)
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/KeyboardServices/TextReplacements.db").path
+        return try readDatabase(at: path)
+        #else
+        throw .unsupportedOperatingSystem
+        #endif
+    }
+
+    #if os(macOS)
+    static func readDatabase(at dbPath: String) throws(FetchError) -> [Entry] {
         var db: OpaquePointer?
 
         let openStatus = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil)
         guard openStatus == SQLITE_OK else {
-            print("Failed to open database")
+            if db != nil { sqlite3_close(db) }
             throw .failedToOpenDatabase(status: openStatus)
         }
 
@@ -112,7 +130,8 @@ public enum SystemUserDictionaryHelper: Sendable {
             sqlite3_close(db)
         }
 
-        let query = "SELECT ZSHORTCUT, ZPHRASE FROM ZTEXTREPLACEMENTENTRY"
+        sqlite3_busy_timeout(db, 100)
+        let query = "SELECT ZSHORTCUT, ZPHRASE FROM ZTEXTREPLACEMENTENTRY WHERE COALESCE(ZWASDELETED, 0) = 0 ORDER BY ZSHORTCUT, ZPHRASE"
         var statement: OpaquePointer?
 
         let prepareStatus = sqlite3_prepare_v2(db, query, -1, &statement, nil)
@@ -126,16 +145,18 @@ public enum SystemUserDictionaryHelper: Sendable {
         }
 
         var entries: [Entry] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
             if let shortcutC = sqlite3_column_text(statement, 0),
                let phraseC = sqlite3_column_text(statement, 1) {
                 let shortcut = String(cString: shortcutC)
                 let phrase = String(cString: phraseC)
                 entries.append(Entry(shortcut: shortcut, phrase: phrase))
             }
+            status = sqlite3_step(statement)
         }
-
+        guard status == SQLITE_DONE else { throw .failedToReadRows(status: status) }
         return entries
-        #endif
     }
+    #endif
 }

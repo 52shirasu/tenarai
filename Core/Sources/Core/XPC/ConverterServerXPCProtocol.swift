@@ -56,6 +56,28 @@ public enum ConverterMaintenanceCommand: Codable, Sendable {
 
     /// 全セッションの学習データをリセットする。
     case resetLearningData
+
+    /// 変換で学習した語の一覧を返す（`learnedConversions`）。
+    case listLearnedConversions
+
+    /// 指定した語の学習を削除し、更新後の一覧を返す。同じ表記はすべての読みで削除される。
+    case forgetLearnedConversions([LearnedConversion])
+}
+
+/// A word the converter learned from commits (reading in katakana).
+public struct LearnedConversion: Codable, Sendable, Hashable {
+    public var reading: String
+    public var word: String
+
+    public init(reading: String, word: String) {
+        self.reading = reading
+        self.word = word
+    }
+
+    /// Learned while romaji was still pending ("おk", "今n"): never a real word.
+    public var hasPendingRomaji: Bool {
+        word.range(of: "[^\\x00-\\x7f][a-z]$", options: .regularExpression) != nil
+    }
 }
 
 /// 1つの変換セッションに対する命令。
@@ -65,6 +87,8 @@ public enum ConverterMaintenanceCommand: Codable, Sendable {
 /// 命令をまとめており、通信仕様上の入口を読みやすく保つために平坦な case 群にはしていない。
 public enum ConverterSessionCommand: Codable, Sendable {
     /// セッションの開始・停止に関する命令。
+    case learning(LocalLearningCommand)
+
     case lifecycle(ConverterSessionLifecycleCommand)
 
     /// Server が列挙する設定項目と、その値の更新に関する命令。
@@ -314,7 +338,7 @@ public struct ConverterTextContext: Codable, Sendable, Equatable {
     /// XPC で運ぶ文脈の上限。
     ///
     /// 実際に変換で使う長さは Server 側で用途別に切り詰める。
-    public static let transportCharacterLimit = 200
+    public static let transportCharacterLimit = 4096
 
     public var leftSideContext: String?
     public var rightSideContext: String?
@@ -329,10 +353,14 @@ public struct ConverterTextContext: Codable, Sendable, Equatable {
 public struct ConverterSessionActivation: Codable, Sendable, Equatable {
     public var config: ConverterSessionConfig
     public var inputLanguage: InputLanguage
+    /// Bundle identifier of the app being typed into; lets tone be learned per app
+    /// (chat vs. e-mail). Optional so older clients still decode.
+    public var clientIdentifier: String?
 
-    public init(config: ConverterSessionConfig, inputLanguage: InputLanguage) {
+    public init(config: ConverterSessionConfig, inputLanguage: InputLanguage, clientIdentifier: String? = nil) {
         self.config = config
         self.inputLanguage = inputLanguage
+        self.clientIdentifier = clientIdentifier
     }
 }
 
@@ -413,6 +441,9 @@ public enum ConverterClientEffect: Codable, Sendable, Equatable {
 /// Client は `effects` を順に実行したあと、`snapshot` をもとに marked text と
 /// 候補ウィンドウを更新する。
 public struct ConverterServerResponse: Codable, Sendable {
+    public var localTendencies: [LocalTendency]?
+    public var learnedConversions: [LearnedConversion]?
+    public var learningFailed: Bool?
     public var handled: Bool
     public var effects: [ConverterClientEffect]
     public var inputState: ConverterInputState
@@ -421,6 +452,9 @@ public struct ConverterServerResponse: Codable, Sendable {
     public var snapshot: ConverterSessionSnapshot
 
     public init(
+        localTendencies: [LocalTendency]? = nil,
+        learnedConversions: [LearnedConversion]? = nil,
+        learningFailed: Bool? = nil,
         handled: Bool = true,
         effects: [ConverterClientEffect] = [],
         inputState: ConverterInputState = .none,
@@ -428,6 +462,9 @@ public struct ConverterServerResponse: Codable, Sendable {
         settings: [ConverterSettingDescriptor] = [],
         snapshot: ConverterSessionSnapshot
     ) {
+        self.localTendencies = localTendencies
+        self.learnedConversions = learnedConversions
+        self.learningFailed = learningFailed
         self.handled = handled
         self.effects = effects
         self.inputState = inputState

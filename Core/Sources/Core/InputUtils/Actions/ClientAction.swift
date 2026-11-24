@@ -32,6 +32,8 @@ public enum ClientAction {
     /// MarkedTextを確定して、さらに追加で入力する
     case commitMarkedTextAndAppendToMarkedText(String)
     case commitMarkedTextAndAppendPieceToMarkedText([InputPiece])
+    /// MarkedTextを確定し、続けて文字列を確定入力してから、さらに追加で入力する
+    case commitMarkedTextAndInsertAndAppendPieceToMarkedText(String, [InputPiece])
 
     /// デバッグウィンドウを表示するコマンド
     case enableDebugWindow

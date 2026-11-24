@@ -68,6 +68,14 @@ public final class OrderedAsyncCommandQueue<Value> {
         startNextIfNeeded()
     }
 
+    /// Abandons the in-flight attempt (its late result is ignored) and runs the head
+    /// entry again. Used to recover when an attempt never finishes.
+    @MainActor public func retryActiveNow() {
+        guard activeOperationID != nil else { return }
+        activeOperationID = nil
+        startNextIfNeeded()
+    }
+
     @MainActor private func startNextIfNeeded() {
         guard activeOperationID == nil, let entry = entries.first else {
             return

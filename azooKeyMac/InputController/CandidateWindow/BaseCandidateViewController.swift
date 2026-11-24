@@ -93,6 +93,7 @@ class BaseCandidateViewController: NSViewController {
     internal var candidates: [ConverterCandidatePresentation] = []
     internal var tableView: NSTableView!
     internal var currentSelectedRow: Int = -1
+    private var cachedMaxTextWidth: CGFloat?
 
     override func loadView() {
         // 親ビュー（ZStackのような役割）
@@ -183,9 +184,13 @@ class BaseCandidateViewController: NSViewController {
         selectionIndex: Int?,
         cursorLocation: CGPoint
     ) {
+        let contentChanged = self.candidates != candidates
         self.candidates = candidates
         self.currentSelectedRow = selectionIndex ?? -1
-        self.tableView.reloadData()
+        if contentChanged {
+            self.cachedMaxTextWidth = nil
+            self.tableView.reloadData()
+        }
         self.resizeWindowToFitContent(cursorLocation: cursorLocation)
         // ConverterServerのsnapshotを描画するだけなので、選択変更をServerへ送り返さない。
         // ここでdelegateへ通知すると、非同期応答のたびに新しい選択commandが生成され、
@@ -194,7 +199,10 @@ class BaseCandidateViewController: NSViewController {
     }
 
     internal func updateSelection(to row: Int, notifySelectionChange: Bool = true) {
-        if row == -1 {
+        guard self.candidates.indices.contains(row) else {
+            self.tableView.deselectAll(nil)
+            self.currentSelectedRow = -1
+            self.updateVisibleRows()
             return
         }
         self.tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -252,7 +260,15 @@ class BaseCandidateViewController: NSViewController {
         let rowHeight = self.tableView.rowHeight
         let tableViewHeight = CGFloat(self.numberOfVisibleRows) * rowHeight
 
-        let maxWidth = self.getMaxTextWidth(candidates: self.candidates.lazy.map(\.text))
+        // Selection changes do not change text metrics. Retain only this list's
+        // width; a new snapshot invalidates it, and screen placement stays fresh.
+        let maxWidth: CGFloat
+        if let cachedMaxTextWidth {
+            maxWidth = cachedMaxTextWidth
+        } else {
+            maxWidth = self.getMaxTextWidth(candidates: self.candidates.lazy.map(\.text))
+            self.cachedMaxTextWidth = maxWidth
+        }
         let windowWidth = self.getWindowWidth(maxContentWidth: maxWidth)
         let newWindowFrame = WindowPositioning.frameNearCursor(
             currentFrame: .init(window.frame),

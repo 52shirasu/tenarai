@@ -98,3 +98,21 @@ import Testing
     firstFinish?(.finish(1))
     #expect(completed == [-1, 2])
 }
+
+@MainActor
+@Test func retryActiveNowRestartsAStuckAttemptAndIgnoresItsLateResult() async {
+    let queue = OrderedAsyncCommandQueue<Int>(scheduleRetry: { $0() }, scheduleTimeout: { _, _ in })
+    var attempts = 0
+    var finishes: [(OrderedAsyncCommandQueue<Int>.Outcome) -> Void] = []
+    var results: [Int] = []
+    queue.enqueue(operation: { finish in attempts += 1; finishes.append(finish) }, completion: { results.append($0) })
+    #expect(attempts == 1)
+    queue.retryActiveNow()
+    #expect(attempts == 2, "stuck attempt restarted")
+    finishes[0](.finish(1))
+    #expect(results.isEmpty, "late result of the abandoned attempt is ignored")
+    finishes[1](.finish(2))
+    #expect(results == [2])
+    queue.retryActiveNow()
+    #expect(attempts == 2, "nothing active, nothing restarted")
+}

@@ -1,5 +1,6 @@
 import Core
 import Foundation
+import LearningCore
 import KanaKanjiConverterModuleWithDefaultDictionary
 
 extension ConverterServer {
@@ -9,6 +10,7 @@ extension ConverterServer {
         request: ConverterKeyEventRequest
     ) throws -> ConverterServerResponse {
         let session = try getSession(sessionID)
+        lastKeyEventDate = Date()
         if request.eventID == session.lastHandledKeyEventID,
            let response = session.lastKeyEventResponse {
             return response
@@ -23,14 +25,41 @@ extension ConverterServer {
         if let activation = request.activation {
             session.config = activation.config
             session.inputLanguage = activation.inputLanguage
+            session.appIdentifier = activation.clientIdentifier
             if activation.inputLanguage == .english {
                 session.manager.stopJapaneseInput()
             }
             session.manager.activate()
         }
+        // A shifted ASCII letter starts a Latin composition until commit/cancel.
+        // Do not change the selected Japanese input source or affect another session.
+        if session.inputState == .none || session.manager.isEmpty {
+            resetLatinComposition(session: session, request: request)
+        }
+        session.manager.defersLatinConversion = session.shiftStartedLatinComposition
+        // Snapshot preferences only at the start of a composition. Background learning
+        // never triggers recomputation of candidates that the user is selecting.
+        if session.inputState == .none {
+            session.setContext(request.context)
+            session.manager.suppressesLearning = Config.LearningExcludedApps().excludes(session.appIdentifier)
+            // The compact context (what Zenzai sees, at most 200 characters per side), not
+            // the raw text: a terminal's 8,000 characters made profile matching take seconds.
+            let context = session.compactFieldContext
+            session.manager.learnedLatinWords = Config.Learning().value == .nothing ? [] : localLearning.tendencies
+                .filter { $0.key.hasPrefix("selectedLatin:") }.prefix(512).map(\.value)
+            session.manager.learnedProfile = LocalExtractor.profile(localLearning.tendencies, context: context)
+            session.toneExample = ConverterSession.toneExampleOverride
+                ?? (Config.Learning().value == .nothing ? "" : LocalExtractor.toneExample(localLearning.tendencies, app: session.appIdentifier))
+        }
         session.setContext(request.context)
-        Config.DebugPredictiveTyping().value = request.enablePredictiveTyping
-        Config.DebugTypoCorrection().value = request.enableTypoCorrection
+        // These live in the app-group suite shared with the IME; avoid two writes
+        // (and cross-process change notifications) on every key event.
+        if Config.DebugPredictiveTyping().value != request.enablePredictiveTyping {
+            Config.DebugPredictiveTyping().value = request.enablePredictiveTyping
+        }
+        if Config.DebugTypoCorrection().value != request.enableTypoCorrection {
+            Config.DebugTypoCorrection().value = request.enableTypoCorrection
+        }
 
         if request.enableOptionDirectFullWidthInput,
            let text = OptionDirectInputResolver.resolve(
@@ -60,9 +89,10 @@ extension ConverterServer {
             eventCore: request.event,
             userAction: userAction,
             inputLanguage: session.inputLanguage,
-            liveConversionEnabled: request.liveConversionEnabled,
+            liveConversionEnabled: request.liveConversionEnabled || session.shiftStartedLatinComposition,
             enableDebugWindow: request.enableDebugWindow,
-            enableSuggestion: request.enableSuggestion
+            enableSuggestion: request.enableSuggestion,
+            shiftStartedLatinComposition: session.shiftStartedLatinComposition
         )
 
         var effects: [ConverterClientEffect] = []
@@ -117,7 +147,7 @@ extension ConverterServer {
     ) -> Bool {
         let manager = session.manager
         let inputState = session.inputState
-        let inputStyle = Self.resolveInputStyle(session.inputLanguage == .english ? .direct : request.inputStyle)
+        let inputStyle = Self.resolveInputStyle((session.inputLanguage == .english || session.shiftStartedLatinComposition) ? .direct : request.inputStyle)
         let leftSideContext = session.conversionLeftSideContext()
         switch action {
         case .consume:
@@ -132,13 +162,16 @@ extension ConverterServer {
         case .appendToMarkedText(let text):
             manager.insertAtCursorPosition(text, inputStyle: inputStyle)
         case .appendPieceToMarkedText(let pieces):
-            manager.insertAtCursorPosition(pieces: pieces, inputStyle: inputStyle)
+            manager.insertAtCursorPosition(pieces: session.shiftStartedLatinComposition ? LatinCompositionInput.typed(pieces) : pieces, inputStyle: inputStyle)
         case .insertWithoutMarkedText(let text):
             effects.append(.insertText(text))
         case .removeLastMarkedText:
             manager.deleteBackwardFromCursorPosition()
             manager.requestResettingSelection()
         case .commitMarkedText:
+            if inputState == .composing {
+                manager.finishPendingRomajiN(inputStyle: inputStyle)
+            }
             let text = manager.commitMarkedText(inputState: inputState)
             if !text.isEmpty {
                 effects.append(.insertText(text))
@@ -149,8 +182,7 @@ extension ConverterServer {
             manager.insertCompositionSeparator(inputStyle: inputStyle, skipUpdate: false)
             manager.requestSetCandidateWindowState(visible: false)
         case .enterCandidateSelectionMode:
-            manager.insertCompositionSeparator(inputStyle: inputStyle, skipUpdate: true)
-            manager.update(requestRichCandidates: true)
+            manager.openCandidateList(inputStyle: inputStyle)
         case .submitSelectedCandidate:
             submitSelectedCandidate(manager: manager, leftSideContext: leftSideContext, effects: &effects)
         case .selectNextCandidate:
@@ -177,14 +209,24 @@ extension ConverterServer {
                 inputState: inputState,
                 effects: &effects
             )
-            manager.insertAtCursorPosition(text, inputStyle: inputStyle)
+            resetLatinComposition(session: session, request: request)
+            let nextStyle = Self.resolveInputStyle((session.inputLanguage == .english || session.shiftStartedLatinComposition) ? .direct : request.inputStyle)
+            manager.insertAtCursorPosition(text, inputStyle: nextStyle)
         case .commitMarkedTextAndAppendPieceToMarkedText(let pieces):
             commitMarkedTextAndContinue(
                 manager: manager,
                 inputState: inputState,
                 effects: &effects
             )
-            manager.insertAtCursorPosition(pieces: pieces, inputStyle: inputStyle)
+            resetLatinComposition(session: session, request: request)
+            let nextStyle = Self.resolveInputStyle((session.inputLanguage == .english || session.shiftStartedLatinComposition) ? .direct : request.inputStyle)
+            manager.insertAtCursorPosition(pieces: pieces, inputStyle: nextStyle)
+        case .commitMarkedTextAndInsertAndAppendPieceToMarkedText(let text, let pieces):
+            // One insertion, so the client observes "Ab " rather than "Ab" and " ".
+            effects.append(.insertText(manager.commitMarkedText(inputState: inputState) + text))
+            resetLatinComposition(session: session, request: request)
+            let nextStyle = Self.resolveInputStyle((session.inputLanguage == .english || session.shiftStartedLatinComposition) ? .direct : request.inputStyle)
+            manager.insertAtCursorPosition(pieces: pieces, inputStyle: nextStyle)
         case .enableDebugWindow:
             manager.requestDebugWindowMode(enabled: true)
         case .disableDebugWindow:
@@ -255,6 +297,18 @@ extension ConverterServer {
              .basedOnSubmitCandidate(let ifIsEmpty, let ifIsNotEmpty):
             return compositionIsEmpty ? ifIsEmpty : ifIsNotEmpty
         }
+    }
+
+    /// A commit-and-type action crosses a composition boundary in one key event.
+    /// The next character must not inherit the previous composition's Latin mode.
+    @MainActor
+    private func resetLatinComposition(session: ConverterSession, request: ConverterKeyEventRequest) {
+        let characters = request.event.characters ?? ""
+        session.shiftStartedLatinComposition = session.inputLanguage == .japanese
+            && request.event.modifierFlags == [.shift]
+            && characters.utf8.count == 1
+            && characters.utf8.allSatisfy { (65...90).contains($0) }
+        session.manager.defersLatinConversion = session.shiftStartedLatinComposition
     }
 
     @MainActor

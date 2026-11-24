@@ -2,11 +2,20 @@ import Cocoa
 import Core
 
 extension NSEvent {
+    /// Re-translate with the active keyboard layout, preserving Shift/Option.
+    /// Lowercasing would corrupt Shift input and non-US layouts.
+    var charactersIgnoringCapsLock: String? {
+        modifierFlags.contains(.capsLock)
+            ? characters(byApplyingModifiers: modifierFlags.subtracting(.capsLock))
+            : characters
+    }
+
     var keyEventCore: KeyEventCore {
         KeyEventCore(
             modifierFlags: .init(from: self.modifierFlags),
-            characters: self.characters,
-            charactersIgnoringModifiers: self.charactersIgnoringModifiers,
+            characters: self.charactersIgnoringCapsLock,
+            charactersIgnoringModifiers: self.modifierFlags.contains(.capsLock)
+                ? self.characters(byApplyingModifiers: []) : self.charactersIgnoringModifiers,
             keyCode: self.keyCode
         )
     }

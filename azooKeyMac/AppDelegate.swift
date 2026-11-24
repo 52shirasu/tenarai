@@ -33,6 +33,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var configWindowController: NSWindowController?
     var userDictionaryEditorWindowController: NSWindowController?
     private let converterServerClient = ConverterServerClient()
+    private var systemDictionaryRefreshTimer: Timer?
+    private var systemDictionaryRefreshInProgress = false
+    private var systemDictionaryExportPending = false
+    /// 前回見た流行語の一覧の stamp。週1回の更新プログラムが一覧を作り直したら変わる
+    private var lastTrendWordsStamp: String?
+
+    @MainActor private func refreshSystemDictionary() {
+        guard !systemDictionaryRefreshInProgress else { return }
+        systemDictionaryRefreshInProgress = true
+        Task { @MainActor in
+            defer { systemDictionaryRefreshInProgress = false }
+            let entries = await Task.detached(priority: .utility) {
+                try? SystemUserDictionaryHelper.fetchEntriesAutomatically()
+            }.value
+            // A failed read must not erase the last successfully imported dictionary.
+            guard let entries else { return }
+            var value = Config.SystemUserDictionary().value
+            let unchanged = value.items.count == entries.count && zip(value.items, entries).allSatisfy {
+                $0.word == $1.phrase && $0.reading == $1.shortcut
+            }
+            guard !unchanged || value.lastUpdate == nil || systemDictionaryExportPending else { return }
+            value.items = entries.map { .init(word: $0.phrase, reading: $0.shortcut) }
+            value.lastUpdate = .now
+            Config.SystemUserDictionary().value = value
+            systemDictionaryExportPending = true
+            converterServerClient.synchronizeUserDictionary(forceExport: true) { [weak self] success in
+                self?.systemDictionaryExportPending = !success
+            }
+        }
+    }
+
+    /// 流行語の一覧（または設定）が前回から変わっていたら、ヘルパーに同期を頼む。
+    /// 書き出すかどうかはヘルパー側の `needsExport` が判断する。初回は値を覚えるだけ
+    @MainActor private func synchronizeIfTrendWordsChanged() {
+        let fileURL = TrendWordsStore.fileURL(applicationSupportDirectoryURL: AppGroup.applicationSupportDirectoryURL())
+        let stamp = TrendWordsStore.stamp(for: fileURL, enabled: Config.TrendWords().value)
+        defer { self.lastTrendWordsStamp = stamp }
+        guard let lastTrendWordsStamp, lastTrendWordsStamp != stamp else {
+            return
+        }
+        self.synchronizeUserDictionaryOnServer(forceExport: false)
+    }
 
     private func exportInitialUserDictionaryIfNeeded() {
         Task { @MainActor in
@@ -110,6 +152,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             await Config.OpenAiApiKey.loadFromKeychain()
         }
         self.exportInitialUserDictionaryIfNeeded()
+        self.refreshSystemDictionary()
+        self.synchronizeIfTrendWordsChanged()
+        self.systemDictionaryRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshSystemDictionary()
+                self?.synchronizeIfTrendWordsChanged()
+            }
+        }
 
         // Check if mainMenu exists, or create it
         if NSApp.mainMenu == nil {

@@ -18,6 +18,7 @@ struct ConfigWindow: View {
     @ConfigState private var userDictionary = Config.UserDictionary()
     @ConfigState private var systemUserDictionary = Config.SystemUserDictionary()
     @ConfigState private var aiBackend = Config.AIBackendPreference()
+    @ConfigState private var trendWords = Config.TrendWords()
 
     @State private var converterServerClient = ConverterServerClient()
     @State private var converterSettingDescriptors: [String: ConverterSettingDescriptor] = [:]
@@ -33,6 +34,7 @@ struct ConfigWindow: View {
     @State private var systemUserDictionaryUpdateMessage: SystemUserDictionaryUpdateMessage?
     @State private var showingLearningResetConfirmation = false
     @State private var learningResetMessage: LearningResetMessage?
+    @State private var learningExcludedApps = Config.LearningExcludedApps().effectiveValue
     @State private var foundationModelsAvailability: FoundationModelsAvailability?
     @State private var availabilityCheckDone = false
     @State private var debugTypoCorrectionState: DebugTypoCorrectionState = .notDownloaded
@@ -40,17 +42,22 @@ struct ConfigWindow: View {
     @State private var debugTypoCorrectionErrorMessage: String?
     @State private var converterProcessRestartInProgress = false
     @State private var converterProcessRestartMessage: String?
+    @State private var trendWordsSummary: String = ""
+    @State private var trendWordsUpdateInProgress = false
+    @State private var trendWordsUpdateFailed = false
 
     private enum Tab: String, CaseIterable, Hashable {
         case basic = "基本"
         case customize = "カスタマイズ"
         case advanced = "詳細設定"
+        case tendencies = "学習した傾向"
 
         var icon: String {
             switch self {
             case .basic: return "star"
             case .customize: return "slider.horizontal.3"
             case .advanced: return "gearshape.2"
+            case .tendencies: return "person.text.rectangle"
             }
         }
     }
@@ -72,10 +79,10 @@ struct ConfigWindow: View {
     private var legacyAzooKeyApplicationSupportDirectoryURL: URL {
         if #available(macOS 13, *) {
             URL.applicationSupportDirectory
-                .appending(path: "azooKey", directoryHint: .isDirectory)
+                .appending(path: "tenarai", directoryHint: .isDirectory)
         } else {
             FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("azooKey", isDirectory: true)
+                .appendingPathComponent("tenarai", isDirectory: true)
         }
     }
 
@@ -264,6 +271,53 @@ struct ConfigWindow: View {
             NSWorkspace.shared.activateFileViewerSelecting([self.azooKeyApplicationSupportDirectoryURL])
         } catch {
             // no-op
+        }
+    }
+
+    private func refreshTrendWordsSummary() {
+        let fileURL = TrendWordsStore.fileURL(applicationSupportDirectoryURL: AppGroup.applicationSupportDirectoryURL())
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path) else {
+            self.trendWordsSummary = "一覧がまだありません"
+            return
+        }
+        let count = TrendWordsStore.load(from: fileURL).count
+        if let modified = attributes[.modificationDate] as? Date {
+            self.trendWordsSummary = "\(count)語 / 更新: \(modified.formatted(date: .numeric, time: .omitted))"
+        } else {
+            self.trendWordsSummary = "\(count)語"
+        }
+    }
+
+    /// アプリ内の更新プログラムを `--force` で起動し、流行語の一覧を今すぐ作り直す
+    private func updateTrendWordsNow() {
+        guard !self.trendWordsUpdateInProgress else {
+            return
+        }
+        self.trendWordsUpdateInProgress = true
+        self.trendWordsUpdateFailed = false
+        let process = Process()
+        process.executableURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/TrendWordsUpdater/TrendWordsUpdater", isDirectory: false)
+        process.arguments = ["--force"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { process in
+            let success = process.terminationReason == .exit && process.terminationStatus == 0
+            DispatchQueue.main.async {
+                self.trendWordsUpdateInProgress = false
+                self.trendWordsUpdateFailed = !success
+                self.refreshTrendWordsSummary()
+                if success {
+                    self.exportUserDictionary()
+                }
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            self.trendWordsUpdateInProgress = false
+            self.trendWordsUpdateFailed = true
         }
     }
 
@@ -566,6 +620,8 @@ struct ConfigWindow: View {
                     basicTabView
                 } else if selectedTab == .customize {
                     customizeTabView
+                } else if selectedTab == .tendencies {
+                    LocalTendenciesView()
                 } else {
                     advancedTabView
                 }
@@ -594,78 +650,9 @@ struct ConfigWindow: View {
     private var basicTabView: some View {
         Form {
             Section {
-                VStack(alignment: .leading) {
-                    Picker("いい感じ変換", selection: $aiBackend) {
-                        Text("オフ").tag(Config.AIBackendPreference.Value.off)
-
-                        if let availability = foundationModelsAvailability, availability.isAvailable {
-                            Text("Foundation Models").tag(Config.AIBackendPreference.Value.foundationModels)
-                        }
-
-                        Text("OpenAI API").tag(Config.AIBackendPreference.Value.openAI)
-                    }
-                    .onAppear {
-                        if !availabilityCheckDone {
-                            foundationModelsAvailability = FoundationModelsClientCompat.checkAvailability()
-                            availabilityCheckDone = true
-
-                            let hasSetAIBackend = Config.object(forKey: "hasSetAIBackendManually") as? Bool ?? false
-                            if !hasSetAIBackend,
-                               aiBackend.value == .off,
-                               let availability = foundationModelsAvailability,
-                               availability.isAvailable {
-                                aiBackend.value = .foundationModels
-                                Config.set(true, forKey: "hasSetAIBackendManually")
-                            }
-
-                            if aiBackend.value == .foundationModels,
-                               let availability = foundationModelsAvailability,
-                               !availability.isAvailable {
-                                aiBackend.value = .off
-                            }
-                        }
-                    }
-                    .onChange(of: aiBackend.value) { _ in
-                        Config.set(true, forKey: "hasSetAIBackendManually")
-                    }
-                }
-
-                if aiBackend.value == .openAI {
-                    HStack {
-                        SecureField("APIキー", text: $openAiApiKey, prompt: Text("例:sk-xxxxxxxxxxx"))
-                        helpButton(
-                            helpContent: "OpenAI APIキーはローカルのみで管理され、外部に公開されることはありません。生成の際にAPIを利用するため、課金が発生します。",
-                            isPresented: $openAiApiKeyPopover
-                        )
-                    }
-                    TextField("モデル名", text: $openAiModelName, prompt: Text("例: gpt-4o-mini"))
-                    TextField("エンドポイント", text: $openAiApiEndpoint, prompt: Text("例: https://api.openai.com/v1/chat/completions"))
-                        .help("例: https://api.openai.com/v1/chat/completions\nGemini: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
-
-                    HStack {
-                        Button("接続テスト") {
-                            Task {
-                                await testConnection()
-                            }
-                        }
-                        .disabled(connectionTestInProgress || openAiApiKey.value.isEmpty)
-
-                        if connectionTestInProgress {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                        }
-                    }
-
-                    if let result = connectionTestResult {
-                        Text(result)
-                            .foregroundColor(result.contains("成功") ? .green : .red)
-                            .font(.caption)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+                Text("変換と学習はこのMac内で処理します。学習した傾向は専用タブで確認・修正・削除できます。")
             } header: {
-                Label("いい感じ変換", systemImage: "sparkles")
+                Label("ローカル処理", systemImage: "desktopcomputer")
             }
 
             Section {
@@ -715,7 +702,36 @@ struct ConfigWindow: View {
                         }
                     }
                 } label: {
-                    Text("システムのユーザ辞書")
+                    Text("システムのユーザ辞書（起動時・60秒ごとに自動読込）")
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("流行語の辞書を使う", isOn: $trendWords)
+                        .onChange(of: self.trendWords.value) { _ in
+                            self.exportUserDictionary()
+                            self.refreshTrendWordsSummary()
+                        }
+                    Text(self.trendWordsSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("週1回、公開されている一覧を取得します。入力した内容は送信しません。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("今すぐ更新") {
+                            self.updateTrendWordsNow()
+                        }
+                        .disabled(!self.trendWords.value || self.trendWordsUpdateInProgress)
+                        if self.trendWordsUpdateInProgress {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if self.trendWordsUpdateFailed {
+                            Text("更新できませんでした")
+                                .font(.caption)
+                        }
+                    }
+                }
+                .onAppear {
+                    self.refreshTrendWordsSummary()
                 }
             } header: {
                 Label("ユーザ辞書", systemImage: "book.closed")
@@ -723,17 +739,7 @@ struct ConfigWindow: View {
 
             Section {
                 Toggle("ライブ変換を有効化", isOn: $liveConversion)
-                HStack {
-                    TextField("変換プロフィール", text: $zenzaiProfile, prompt: Text("例：田中太郎/高校生"))
-                    helpButton(
-                        helpContent: """
-                    Zenzaiはあなたのプロフィールを考慮した変換を行うことができます。
-                    名前や仕事、趣味などを入力すると、それに合わせた変換が自動で推薦されます。
-                    （実験的な機能のため、精度が不十分な場合があります）
-                    """,
-                        isPresented: $zenzaiProfileHelpPopover
-                    )
-                }
+                Text("文脈推論はMac内で処理します。通信拒否とモデル検証に成功した場合に有効になり、失敗時は辞書変換を続けます。")
             } header: {
                 Label("変換設定", systemImage: "brain")
             }
@@ -758,11 +764,28 @@ struct ConfigWindow: View {
             )
 
             Section {
-                Picker("履歴学習", selection: $learning) {
+                Picker("変換履歴の学習", selection: $learning) {
                     Text("学習する").tag(Config.Learning.Value.inputAndOutput)
-                    Text("学習を停止").tag(Config.Learning.Value.onlyOutput)
-                    Text("学習を無視").tag(Config.Learning.Value.nothing)
+                    Text("新しい学習を停止").tag(Config.Learning.Value.onlyOutput)
+                    Text("学習結果を使わない").tag(Config.Learning.Value.nothing)
                 }
+                Text("確定した語句と読みの学習データをこのMacに保存し、変換に利用します。下のリセットで削除できます。専門分野・表記の傾向は別途「学習した傾向」で管理します。")
+                LabeledContent {
+                    HStack {
+                        TextField("バンドルID（カンマ区切り）", text: $learningExcludedApps)
+                        Button("保存") {
+                            Config.LearningExcludedApps().value = learningExcludedApps
+                        }
+                        .disabled(learningExcludedApps == Config.LearningExcludedApps().effectiveValue)
+                        Button("初期値") {
+                            learningExcludedApps = Config.LearningExcludedApps.default
+                            Config.LearningExcludedApps().value = learningExcludedApps
+                        }
+                    }
+                } label: {
+                    Text("学習しないアプリ")
+                }
+                Text("ここに並べたアプリ（ターミナル、パスワード管理など）で確定した文字は、変換の学習・傾向・個人用言語モデルのどれにも使いません。学習済みの内容による変換はそのまま使えます。")
                 LabeledContent {
                     HStack {
                         switch learningResetMessage {
@@ -796,6 +819,12 @@ struct ConfigWindow: View {
             } header: {
                 Label("学習", systemImage: "memorychip")
             }
+
+            converterSettingSection(
+                title: "個人用言語モデル",
+                systemImage: "person.text.rectangle",
+                keys: [Config.ZenzaiPersonalizationLevel.key]
+            )
 
             Section {
                 Picker("入力方式", selection: $inputStyle) {
@@ -833,17 +862,7 @@ struct ConfigWindow: View {
     private var advancedTabView: some View {
         Form {
             Section {
-                HStack {
-                    TextField("変換プロフィール", text: $zenzaiProfile, prompt: Text("例：田中太郎/高校生"))
-                    helpButton(
-                        helpContent: """
-                    Zenzaiはあなたのプロフィールを考慮した変換を行うことができます。
-                    名前や仕事、趣味などを入力すると、それに合わせた変換が自動で推薦されます。
-                    （実験的な機能のため、精度が不十分な場合があります）
-                    """,
-                        isPresented: $zenzaiProfileHelpPopover
-                    )
-                }
+                Text("文脈推論はMac内で処理します。通信拒否とモデル検証に成功した場合に有効になり、失敗時は辞書変換を続けます。")
                 HStack {
                     TextField(
                         "Zenzaiの推論上限",
@@ -923,12 +942,6 @@ struct ConfigWindow: View {
                         self.debugTypoCorrectionDownloadInProgress = false
                         self.debugTypoCorrectionErrorMessage = nil
                     }
-                }
-                Picker("パーソナライズ", selection: $zenzaiPersonalizationLevel) {
-                    Text("オフ").tag(Config.ZenzaiPersonalizationLevel.Value.off)
-                    Text("弱く").tag(Config.ZenzaiPersonalizationLevel.Value.soft)
-                    Text("普通").tag(Config.ZenzaiPersonalizationLevel.Value.normal)
-                    Text("強く").tag(Config.ZenzaiPersonalizationLevel.Value.hard)
                 }
                 LabeledContent("アプリデータ") {
                     HStack {

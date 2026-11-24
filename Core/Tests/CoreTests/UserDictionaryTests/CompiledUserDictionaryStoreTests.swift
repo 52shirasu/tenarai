@@ -63,6 +63,73 @@ import Testing
     }
 }
 
+@Test func mergedEntriesDropTrendWordsSharingPersonalReadings() throws {
+    let personal = [
+        DicdataElement(word: "自分の語", ruby: "バズル", cid: CIDData.固有名詞.cid, mid: MIDData.一般.mid, value: -5)
+    ]
+    let trend: [TrendWordsStore.Entry] = [
+        .init(reading: "ばずる", word: "バズる"),
+        .init(reading: "かくさん", word: "拡散")
+    ]
+
+    let merged = CompiledUserDictionaryStore.mergedEntries(personal: personal, trend: trend)
+
+    #expect(merged.count == 2)
+    #expect(merged[0].word == "自分の語")
+    #expect(!merged.contains { $0.word == "バズる" })
+    let added = try #require(merged.first { $0.word == "拡散" })
+    #expect(added.ruby == "カクサン")
+    #expect(added.lcid == CIDData.固有名詞.cid)
+    #expect(added.rcid == CIDData.固有名詞.cid)
+    #expect(added.mid == MIDData.一般.mid)
+    #expect(added.value() == -5)
+}
+
+@Test func exportWritesTrendStampAndNeedsExportFollowsTrendFile() throws {
+    let memoryURL = try makeTemporaryDirectoryURL()
+    let trendDirectoryURL = try makeTemporaryDirectoryURL()
+    let trendFileURL = trendDirectoryURL.appendingPathComponent("trend.tsv", isDirectory: false)
+    try "かくさん\t拡散\n".write(to: trendFileURL, atomically: true, encoding: .utf8)
+    let charIDFileURL = try makeTemporaryCharIDFileURL(characters: "\0カクサンバズル")
+
+    #expect(CompiledUserDictionaryStore.needsExport(memoryDirectoryURL: memoryURL, trendFileURL: trendFileURL, trendEnabled: true))
+
+    try CompiledUserDictionaryStore.export(
+        memoryDirectoryURL: memoryURL,
+        personal: [],
+        trendFileURL: trendFileURL,
+        trendEnabled: true,
+        charIDFileURL: charIDFileURL
+    )
+
+    let directoryURL = CompiledUserDictionaryStore.directoryURL(memoryDirectoryURL: memoryURL)
+    let stampURL = directoryURL.appendingPathComponent("trend.stamp", isDirectory: false)
+    #expect(try String(contentsOf: stampURL, encoding: .utf8) == TrendWordsStore.stamp(for: trendFileURL, enabled: true))
+    #expect(CompiledUserDictionaryStore.hasCompiledDictionary(at: directoryURL))
+    #expect(!CompiledUserDictionaryStore.needsExport(memoryDirectoryURL: memoryURL, trendFileURL: trendFileURL, trendEnabled: true))
+    // 設定を切り替えると書き出しが必要になる
+    #expect(CompiledUserDictionaryStore.needsExport(memoryDirectoryURL: memoryURL, trendFileURL: trendFileURL, trendEnabled: false))
+
+    try "かくさん\t拡散\nばずる\tバズる\n".write(to: trendFileURL, atomically: true, encoding: .utf8)
+    #expect(CompiledUserDictionaryStore.needsExport(memoryDirectoryURL: memoryURL, trendFileURL: trendFileURL, trendEnabled: true))
+}
+
+@Test func needsExportIsFalseForEmptyDictionaryWithMatchingStamp() throws {
+    let memoryURL = try makeTemporaryDirectoryURL()
+    let trendFileURL = try makeTemporaryDirectoryURL().appendingPathComponent("trend.tsv", isDirectory: false)
+
+    try CompiledUserDictionaryStore.export(
+        memoryDirectoryURL: memoryURL,
+        personal: [],
+        trendFileURL: trendFileURL,
+        trendEnabled: true
+    )
+
+    let directoryURL = CompiledUserDictionaryStore.directoryURL(memoryDirectoryURL: memoryURL)
+    #expect(!CompiledUserDictionaryStore.hasCompiledDictionary(at: directoryURL))
+    #expect(!CompiledUserDictionaryStore.needsExport(memoryDirectoryURL: memoryURL, trendFileURL: trendFileURL, trendEnabled: true))
+}
+
 private func makeTemporaryDirectoryURL() throws -> URL {
     let directoryURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("CompiledUserDictionaryStoreTests-\(UUID().uuidString)", isDirectory: true)

@@ -18,7 +18,8 @@ public enum InputState: Sendable, Hashable {
         inputLanguage: InputLanguage,
         liveConversionEnabled: Bool,
         enableDebugWindow: Bool,
-        enableSuggestion: Bool
+        enableSuggestion: Bool,
+        shiftStartedLatinComposition: Bool = false
     ) -> (ClientAction, ClientActionCallback) {
         if event.modifierFlags.contains(.command) {
             return (.fallthrough, .fallthrough)
@@ -320,6 +321,10 @@ public enum InputState: Sendable, Hashable {
                 case .ten:
                     return (.submitHalfWidthRomanCandidate, .basedOnSubmitCandidate(ifIsEmpty: .none, ifIsNotEmpty: .selecting))
                 }
+            case .number(let num) where shiftStartedLatinComposition:
+                // Shift で始めた英字では Space で候補を開くが、続く数字は "iPhone 15" や
+                // パスワードの一部であることが多い。候補番号にせず、確定して空白と数字を入れる。
+                return (.commitMarkedTextAndInsertAndAppendPieceToMarkedText(" ", [num.inputPiece]), .transition(.composing))
             case .number(let num):
                 switch num {
                 case .one, .two, .three, .four, .five, .six, .seven, .eight, .nine:

@@ -3,7 +3,7 @@ set -eu
 
 agent_path="$1"
 server_path="$2"
-service_name="${3:-dev.ensan.inputmethod.azooKeyMac.ConverterServer}"
+service_name="${3:-local.tenarai.inputmethod.tenarai.ConverterServer}"
 
 agent_dir="$(dirname "${agent_path}")"
 mkdir -p "${agent_dir}"
@@ -28,9 +28,9 @@ cat > "${agent_path}" <<PLIST
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/${service_name}.stdout.log</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/${service_name}.stderr.log</string>
+    <string>/dev/null</string>
 </dict>
 </plist>
 PLIST

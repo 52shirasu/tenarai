@@ -2,11 +2,21 @@ import Foundation
 
 /// namespace for `Config`
 public enum Config {
+    // Synthetic scenarios must neither read nor write the user's preferences.
+    // The harness removes this unique suite when the temporary test root is removed.
+    public static let testSuiteName: String? = {
+        guard let root = ProcessInfo.processInfo.environment["TENARAI_TEST_ROOT"], root.hasPrefix("/") else { return nil }
+        return "local.tenarai.tenarai.Tests." + URL(fileURLWithPath: root).lastPathComponent
+    }()
+
     nonisolated(unsafe) public static let userDefaults: UserDefaults = {
+        if let testSuiteName {
+            return UserDefaults(suiteName: testSuiteName)!
+        }
         #if os(macOS)
-        UserDefaults(suiteName: AppGroup.azooKeyMacIdentifier) ?? .standard
+        return UserDefaults(suiteName: AppGroup.azooKeyMacIdentifier) ?? .standard
         #else
-        .standard
+        return .standard
         #endif
     }()
 
@@ -14,21 +24,21 @@ public enum Config {
         if let value = Self.userDefaults.object(forKey: key) {
             return value
         }
-        return UserDefaults.standard.object(forKey: key)
+        return testSuiteName == nil ? UserDefaults.standard.object(forKey: key) : nil
     }
 
     public static func data(forKey key: String) -> Data? {
         if let value = Self.userDefaults.data(forKey: key) {
             return value
         }
-        return UserDefaults.standard.data(forKey: key)
+        return testSuiteName == nil ? UserDefaults.standard.data(forKey: key) : nil
     }
 
     public static func string(forKey key: String) -> String? {
         if let value = Self.userDefaults.string(forKey: key) {
             return value
         }
-        return UserDefaults.standard.string(forKey: key)
+        return testSuiteName == nil ? UserDefaults.standard.string(forKey: key) : nil
     }
 
     public static func set(_ value: Any?, forKey key: String) {

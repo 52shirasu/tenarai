@@ -1,6 +1,6 @@
 import Foundation
 
-#if canImport(FoundationModels)
+#if canImport(FoundationModels) && !TENARAI_LOCAL_ONLY
 import FoundationModels
 #endif
 
@@ -57,7 +57,7 @@ public enum FoundationModelsClient {
 
     // Check if Foundation Models is available on this system
     public static func checkAvailability() -> FoundationModelsAvailability {
-        #if canImport(FoundationModels)
+        #if canImport(FoundationModels) && !TENARAI_LOCAL_ONLY
         let systemModel = SystemLanguageModel.default
 
         switch systemModel.availability {
@@ -82,7 +82,7 @@ public enum FoundationModelsClient {
         #endif
     }
 
-    #if canImport(FoundationModels)
+    #if canImport(FoundationModels) && !TENARAI_LOCAL_ONLY
     @Generable
     public struct PredictionResponse: Codable {
         @Guide(description: "Array of prediction strings", .count(3...5))
@@ -97,7 +97,7 @@ public enum FoundationModelsClient {
     #endif
 
     public static func sendRequest(_ request: OpenAIRequest, logger: ((String) -> Void)? = nil) async throws -> [String] {
-        #if canImport(FoundationModels)
+        #if canImport(FoundationModels) && !TENARAI_LOCAL_ONLY
         logger?("Foundation Models request started")
 
         let systemModel = SystemLanguageModel.default
@@ -146,7 +146,7 @@ public enum FoundationModelsClient {
     }
 
     public static func sendTextTransformRequest(_ prompt: String, logger: ((String) -> Void)? = nil) async throws -> String {
-        #if canImport(FoundationModels)
+        #if canImport(FoundationModels) && !TENARAI_LOCAL_ONLY
         logger?("Foundation Models text transform request started")
 
         let systemModel = SystemLanguageModel.default

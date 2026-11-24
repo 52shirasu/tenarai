@@ -61,7 +61,7 @@ extension Config {
 
         public init() {}
         static let `default`: Value = .inputAndOutput
-        public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.learning"
+        public static let key: String = "local.tenarai.inputmethod.tenarai.preference.learning"
     }
 }
 
@@ -107,7 +107,7 @@ extension Config {
         public static let `default`: Value = .init(items: [
             .init(word: "azooKey", reading: "あずーきー", hint: "アプリ")
         ])
-        public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.user_dictionary_temporal2"
+        public static let key: String = "local.tenarai.inputmethod.tenarai.preference.user_dictionary_temporal2"
     }
 
     public struct SystemUserDictionary: CustomCodableConfigItem {
@@ -123,7 +123,7 @@ extension Config {
         }
 
         public static let `default`: Value = .init(items: [])
-        public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.system_user_dictionary"
+        public static let key: String = "local.tenarai.inputmethod.tenarai.preference.system_user_dictionary"
     }
 }
 
@@ -135,24 +135,32 @@ extension Config {
             case soft
             case normal
             case hard
+            /// Strength chosen from measurements on the user's own commits (normal until
+            /// there is clear evidence; see PersonalLanguageModelStore.tune).
+            case auto
 
+            /// Measured on the tenarai corpora (Oct 5): with a sentence corpus, 0.2 adds
+            /// personal habits without hurting general text; 0.5 already costs accuracy and
+            /// 1.0 cut correct conversions by about a third.
             public var alpha: Float {
                 switch self {
                 case .off:
                     0
                 case .soft:
-                    0.5
+                    0.1
                 case .normal:
-                    1.0
+                    0.2
                 case .hard:
-                    1.5
+                    0.35
+                case .auto:
+                    PersonalLanguageModelStore.shared.tunedAlpha
                 }
             }
         }
 
         public init() {}
-        public static let `default`: Value = .normal
-        public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.zenzai.personalization_level"
+        public static let `default`: Value = .auto
+        public static let key: String = "local.tenarai.inputmethod.tenarai.preference.zenzai.personalization_level"
     }
 }
 
@@ -168,7 +176,7 @@ extension Config {
 
         public init() {}
         public static let `default`: Value = .default
-        public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.input_style"
+        public static let key: String = "local.tenarai.inputmethod.tenarai.preference.input_style"
     }
 }
 
@@ -203,7 +211,7 @@ extension Config {
 
         public init() {}
         public static let `default`: Value = .qwerty
-        public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.keyboard_layout"
+        public static let key: String = "local.tenarai.inputmethod.tenarai.preference.keyboard_layout"
     }
 
     public struct AIBackendPreference: CustomCodableConfigItem {
@@ -224,6 +232,6 @@ extension Config {
             }
             return .off
         }
-        public static let key: String = "dev.ensan.inputmethod.azooKeyMac.preference.aiBackend"
+        public static let key: String = "local.tenarai.inputmethod.tenarai.preference.aiBackend"
     }
 }

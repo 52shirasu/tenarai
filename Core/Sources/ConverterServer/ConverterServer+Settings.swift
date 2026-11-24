@@ -88,7 +88,14 @@ extension ConverterServer {
                 value: .string(Config.Learning().value.rawValue)
             ),
             descriptor(
-                key: "dev.ensan.inputmethod.azooKeyMac.setting.action.resetLearningData",
+                key: Config.LearningExcludedApps.key,
+                title: "学習しないアプリ（バンドルID、カンマ区切り）",
+                section: "履歴学習",
+                kind: .textField(secure: false),
+                value: .string(Config.LearningExcludedApps().effectiveValue)
+            ),
+            descriptor(
+                key: "local.tenarai.inputmethod.tenarai.setting.action.resetLearningData",
                 title: "履歴学習データをリセット",
                 section: "履歴学習",
                 kind: .button(action: "resetLearningData")
@@ -129,9 +136,10 @@ extension ConverterServer {
             ),
             descriptor(
                 key: Config.ZenzaiPersonalizationLevel.key,
-                title: "パーソナライズ",
+                title: personalizationTitle(),
                 section: "開発者向け設定",
                 kind: .selector(options: [
+                    .init(title: "自動（測定して調整）", value: .string(Config.ZenzaiPersonalizationLevel.Value.auto.rawValue)),
                     .init(title: "オフ", value: .string(Config.ZenzaiPersonalizationLevel.Value.off.rawValue)),
                     .init(title: "弱く", value: .string(Config.ZenzaiPersonalizationLevel.Value.soft.rawValue)),
                     .init(title: "普通", value: .string(Config.ZenzaiPersonalizationLevel.Value.normal.rawValue)),
@@ -154,7 +162,7 @@ extension ConverterServer {
                 value: .bool(Config.DebugTypoCorrection().value)
             ),
             descriptor(
-                key: "dev.ensan.inputmethod.azooKeyMac.setting.action.downloadDebugTypoCorrectionWeights",
+                key: "local.tenarai.inputmethod.tenarai.setting.action.downloadDebugTypoCorrectionWeights",
                 title: "入力訂正の重みをダウンロード",
                 section: "開発者向け設定",
                 kind: .button(action: "downloadDebugTypoCorrectionWeights")
@@ -172,7 +180,7 @@ extension ConverterServer {
                 kind: .custom(surface: "systemUserDictionary")
             ),
             descriptor(
-                key: "dev.ensan.inputmethod.azooKeyMac.setting.surface.foundationModelsAvailability",
+                key: "local.tenarai.inputmethod.tenarai.setting.surface.foundationModelsAvailability",
                 title: "Foundation Models availability",
                 section: "基本",
                 kind: .custom(surface: "foundationModelsAvailability")
@@ -192,7 +200,7 @@ extension ConverterServer {
                 value: .string(Config.OpenAiApiEndpoint().value)
             ),
             descriptor(
-                key: "dev.ensan.inputmethod.azooKeyMac.preference.OpenAiApiKey",
+                key: "local.tenarai.inputmethod.tenarai.preference.OpenAiApiKey",
                 title: "OpenAI APIキー",
                 section: "OpenAI API",
                 kind: .textField(secure: true)
@@ -215,6 +223,17 @@ extension ConverterServer {
         case .toggle, .selector, .textField, .number:
             return false
         }
+    }
+
+    /// "個人用言語モデル（自分の 120 文節で正解: なし 80% → 普通 84%、自動の強さ 0.20）"
+    static func personalizationTitle() -> String {
+        let evaluation = PersonalLanguageModelStore.shared.evaluation()
+        guard evaluation.pairs > 0 else { return "個人用言語モデルの強さ（効果はまだ測定していません）" }
+        func percent(_ alpha: Float) -> String {
+            String(format: "%.0f%%", Double(evaluation.matches(alpha: alpha)) * 100 / Double(evaluation.pairs))
+        }
+        let tuned = evaluation.tunedAlpha
+        return "個人用言語モデルの強さ（自分の確定 \(evaluation.pairs) 文節で一致率: なし \(percent(0)) → 普通 \(percent(PersonalLanguageModelStore.defaultAlpha))、自動の強さ \(String(format: "%.2f", tuned))）"
     }
 
     @MainActor
@@ -253,6 +272,11 @@ extension ConverterServer {
                 throw ConverterServerError.invalidSettingValue(key)
             }
             Config.KeyboardLayout().value = layout
+        case Config.LearningExcludedApps.key:
+            guard case .string(let value) = value, value.count <= 4096 else {
+                throw ConverterServerError.invalidSettingValue(key)
+            }
+            Config.LearningExcludedApps().value = value
         case Config.ZenzaiProfile.key:
             guard case .string(let value) = value else {
                 throw ConverterServerError.invalidSettingValue(key)
