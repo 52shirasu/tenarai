@@ -40,6 +40,18 @@ public struct ConverterClientEventRoutingContext: Sendable, Equatable {
 }
 
 public enum ConverterClientEventRouter {
+    /// Command+Enter is "send" in chat apps. It falls through like every Command
+    /// shortcut, but an app that receives it while marked text is still up neither
+    /// sends nor commits. The client therefore commits the displayed composition
+    /// first, so one Command+Enter both commits and sends. Other Command shortcuts
+    /// keep the composition as it is (Command+C, Command+Z and so on act on the app).
+    public static func commitsDisplayedCompositionBeforeFallthrough(event: KeyEventCore) -> Bool {
+        guard event.modifierFlags.contains(.command) else {
+            return false
+        }
+        return event.keyCode == 0x24 || event.keyCode == 0x4C
+    }
+
     public static func disposition(
         event: KeyEventCore,
         context: ConverterClientEventRoutingContext

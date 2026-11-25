@@ -83,3 +83,16 @@ private func disposition(
     #expect(disposition(event: event) == .fallthroughToApplication)
     #expect(disposition(event: event, state: .composing) == .sendToServer)
 }
+
+@Test func commandEnterCommitsDisplayedCompositionBeforeFallingThrough() {
+    func event(_ flags: KeyEventCore.ModifierFlag, _ keyCode: UInt16, _ characters: String = "\r") -> KeyEventCore {
+        KeyEventCore(modifierFlags: flags, characters: characters, charactersIgnoringModifiers: characters, keyCode: keyCode)
+    }
+    #expect(ConverterClientEventRouter.commitsDisplayedCompositionBeforeFallthrough(event: event([.command], 0x24)))
+    #expect(ConverterClientEventRouter.commitsDisplayedCompositionBeforeFallthrough(event: event([.command], 0x4C)))
+    #expect(ConverterClientEventRouter.commitsDisplayedCompositionBeforeFallthrough(event: event([.command, .shift], 0x24)))
+    // Plain Enter is the server's commit; other Command shortcuts leave the composition alone.
+    #expect(!ConverterClientEventRouter.commitsDisplayedCompositionBeforeFallthrough(event: event([], 0x24)))
+    #expect(!ConverterClientEventRouter.commitsDisplayedCompositionBeforeFallthrough(event: event([.command], 8, "c")))
+    #expect(!ConverterClientEventRouter.commitsDisplayedCompositionBeforeFallthrough(event: event([.control], 0x24)))
+}

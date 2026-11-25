@@ -540,6 +540,18 @@ class azooKeyMacInputController: IMKInputController, NSMenuItemValidation { // s
            Self.mayBelongToApplication(event, inputLanguage: self.inputLanguage) {
             self.waitForPendingKeyEvents(timeout: 0.5)
         }
+        // Command+Enter (send): commit what is displayed, then let the key reach the app.
+        if ConverterClientEventRouter.commitsDisplayedCompositionBeforeFallthrough(event: event),
+           case .insertDisplayedText = CompositionCommitPlan.make(pendingKeyEvents: self.pendingKeyEventCount, displayed: self.currentConverterView),
+           let client = self.client() {
+            self.timing.count("commitBeforeCommandEnter")
+            if let text = self.insertDisplayedComposition(into: client) {
+                self.converterServerClient.send({ _ in .learning(.observe(text: text, origin: .typed)) }) { _ in }
+            }
+            self.converterServerClient.sendIfSessionOpen({ _ in .composition(.commit) }, completion: { _ in })
+            self.refreshCandidateWindow()
+            self.refreshPredictionWindow()
+        }
         let disposition = ConverterClientEventRouter.disposition(
             event: event,
             context: .init(
