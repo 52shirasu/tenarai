@@ -102,6 +102,11 @@ for row in subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True).s
     if len(parts) == 2 and parts[1] == executable:
         subprocess.run(['kill', '-TERM', parts[0]], check=False)
 subprocess.run(['open', str(target)], check=True)
+# macOS does not always start an ad-hoc signed input method after login even when
+# it is the selected source; start it at login. Not fatal: the IME is already running.
+launcher = subprocess.run([str(repo/'Tools/install_input_method_login_launch_agent.sh'), str(target)], check=False)
+if launcher.returncode != 0:
+    print('WARNING: could not install the login launcher; after a login, open the bundle once by hand')
 print('Installed:', target)
 if previous_source.startswith('local.tenarai.inputmethod.tenarai'):
     try:
